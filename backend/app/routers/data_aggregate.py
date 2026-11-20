@@ -65,6 +65,18 @@ def export_entries(
         headers={"Content-Disposition": 'attachment; filename="data_aggregate.csv"'})
 
 
+@router.get("/plan-index", response_model=dict)
+def get_plan_index() -> dict:
+    """聚合计划索引表：来源版本、节点复用索引、计划索引与命中统计。"""
+    return service.get_plan_index()
+
+
+@router.get("/affected-plans", response_model=dict)
+def get_affected_plans(source_code: str = Query(..., description="指标域或派生指标编号")) -> dict:
+    """通过计划索引表定位引用某来源（含传递依赖）的全部聚合计划。"""
+    return service.get_affected_plans(source_code)
+
+
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
     """读取单条聚合配置明细；不存在时给出可读的错误说明。"""
@@ -72,6 +84,15 @@ def get_entry(entry_id: int) -> dict:
     if entry is None:
         raise HTTPException(status_code=404, detail=f"聚合配置 {entry_id} 不存在或已归档")
     return entry
+
+
+@router.put("/{entry_id}", response_model=ActionResult)
+def update_entry(entry_id: int, payload: dict[str, object]) -> ActionResult:
+    """修改聚合配置；实质字段变更只失效本配置的计划节点。"""
+    entry, message = service.update_entry(entry_id, payload)
+    if entry is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=entry)
 
 
 @router.post("", response_model=ActionResult)
@@ -93,9 +114,10 @@ def run_action(entry_id: int, payload: ActionPayload) -> ActionResult:
 
 
 @router.get("/{entry_id}/compute-plan")
-def get_compute_plan(entry_id: int) -> dict:
+def get_compute_plan(entry_id: int, force: bool = Query(default=False, description="强制重建，跳过索引快速路径")) -> dict:
     """获取聚合配置的计算计划（指标域→派生指标→聚合的完整链路）。"""
-    plan = service.get_compute_plan(entry_id)
+    from app.engine.plan_registry import plan_registry
+    plan = plan_registry.get_plan(entry_id, force=force)
     if not plan.get("ok"):
         raise HTTPException(status_code=404, detail=plan)
     return plan
@@ -103,8 +125,27 @@ def get_compute_plan(entry_id: int) -> dict:
 
 @router.get("/{entry_id}/preview-sql")
 def get_preview_sql(entry_id: int) -> dict:
-    """获取聚合配置的预览SQL。"""
-    from app.engine.metric_calculator import MetricCalculator
-    calc = MetricCalculator()
-    sql = calc.preview_sql(entry_id)
-    return {"aggregate_id": entry_id, "sql": sql}
+    """获取聚合配置的预览SQL（固化本次计划列出的来源版本并给出版本校验结果）。"""
+    return service.get_preview_sql(entry_id)
+
+
+@router.get("/{entry_id}/recompute-scope")
+def get_recompute_scope(entry_id: int) -> dict:
+    """获取最近一次计划生成的实际重算范围（重建/复用节点明细）。"""
+    scope = service.get_recompute_scope(entry_id)
+    if not scope.get("ok"):
+        raise HTTPException(status_code=404, detail=scope)
+    return scope
+
+
+@router.get("/{entry_id}/plan-diff")
+def get_plan_diff(
+    entry_id: int,
+    from_version: int = Query(..., description="旧计划版本"),
+    to_version: int = Query(..., description="新计划版本"),
+) -> dict:
+    """比较同一输出表改动前后两个计划版本的步骤、版本清单与重算范围。"""
+    diff = service.diff_plans(entry_id, from_version, to_version)
+    if not diff.get("ok"):
+        raise HTTPException(status_code=404, detail=diff)
+    return diff

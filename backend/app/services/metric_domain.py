@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.store import store
+from app.engine.plan_registry import plan_registry
 
 MODULE = "metric_domain"
 LIST_FIELDS = ["域编号", "域名称", "业务域描述", "数据源表", "更新频率", "负责人", "域状态", "创建时间"]
@@ -48,7 +49,33 @@ class MetricDomainService:
         entry["pending"] = True
         entry["abnormal"] = False
         rows.append(entry)
+        plan_registry.sources.register(str(entry.get("域编号", "")).strip(), "domain")
         return entry, []
+
+    def update_entry(self, entry_id: int, values: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+        """修改指标域；数据源表/域状态等实质内容变更驱动来源版本递增。"""
+        entry = store.find(MODULE, entry_id)
+        if entry is None:
+            return None, f"指标域 {entry_id} 不存在或已归档"
+        before = {field: entry.get(field) for field in LIST_FIELDS}
+        for field in LIST_FIELDS:
+            if field in values and values.get(field) is not None:
+                entry[field] = values.get(field)
+        changed_fields = [
+            field for field in LIST_FIELDS
+            if str(before.get(field, "")) != str(entry.get(field, ""))
+        ]
+        if not changed_fields:
+            return entry, "指标域无实质变更"
+        code = str(entry.get("域编号", "")).strip()
+        impact = plan_registry.notify_source_change(code, f"字段变更：{'、'.join(changed_fields)}")
+        if impact.get("changed"):
+            change = impact["change"]
+            return entry, (
+                f"指标域 {code} 来源版本 v{change['old_version']}→v{change['new_version']}，"
+                f"受影响聚合计划 {len(impact['affected_plans'])} 份"
+            )
+        return entry, "指标域已更新（未产生新版本）"
 
     def run_action(self, entry_id: int, action: str) -> tuple[dict[str, Any] | None, str]:
         entry = store.find(MODULE, entry_id)
@@ -62,4 +89,6 @@ class MetricDomainService:
         entry["status"] = target
         entry["pending"] = target != STATUS_ORDER[-1]
         entry["abnormal"] = action in NEGATIVE_ACTIONS
+        plan_registry.notify_source_change(
+            str(entry.get("域编号", "")).strip(), f"状态流转为{target}")
         return entry, f"指标域已{action}"

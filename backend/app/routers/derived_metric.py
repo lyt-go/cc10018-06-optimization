@@ -83,6 +83,15 @@ def create_entry(payload: dict[str, object]) -> ActionResult:
     return ActionResult(ok=True, message="派生指标已登记", entry=entry)
 
 
+@router.put("/{entry_id}", response_model=ActionResult)
+def update_entry(entry_id: int, payload: dict[str, object]) -> ActionResult:
+    """修改派生指标；公式/口径/父指标变更会递增来源版本并定位受影响的聚合计划。"""
+    entry, message = service.update_entry(entry_id, payload)
+    if entry is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=entry)
+
+
 @router.post("/{entry_id}/actions", response_model=ActionResult)
 def run_action(entry_id: int, payload: ActionPayload) -> ActionResult:
     """对单条派生指标执行提交校验、标记生效、标记废弃；不允许的动作会被拦下并说明原因。"""

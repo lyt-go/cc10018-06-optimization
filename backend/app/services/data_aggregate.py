@@ -1,10 +1,15 @@
-"""数据聚合业务规则：状态流转、字段校验、跨模块依赖校验与计算计划生成。"""
+"""数据聚合业务规则：状态流转、字段校验、跨模块依赖校验与计算计划生成。
+
+计算计划与预览 SQL 统一通过聚合计划索引表（plan_registry）获取：首次生成后按
+aggregate_id 隔离缓存节点，连续读取未变更配置走快速路径，不再重走完整依赖树。
+"""
 from __future__ import annotations
 
 from typing import Any
 
 from app.store import store
 from app.engine.metric_calculator import MetricCalculator
+from app.engine.plan_registry import plan_registry
 
 MODULE = "data_aggregate"
 LIST_FIELDS = ["配置编号", "数据来源", "聚合维度", "聚合函数", "过滤条件", "输出表名", "增量键", "更新策略"]
@@ -38,7 +43,7 @@ class DataAggregateService:
     def get_entry(self, entry_id: int) -> dict[str, Any] | None:
         entry = store.find(MODULE, entry_id)
         if entry:
-            # 附加计算计划预览
+            # 附加计算计划预览（命中索引表快速路径时不重走依赖树）
             calc = MetricCalculator()
             entry["_compute_plan"] = calc.build_compute_plan(entry_id)
             entry["_preview_sql"] = calc.preview_sql(entry_id)
@@ -63,6 +68,28 @@ class DataAggregateService:
         entry["abnormal"] = False
         rows.append(entry)
         return entry, []
+
+    def update_entry(self, entry_id: int, values: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+        """修改聚合配置；实质字段变更只使本配置的计划失效，不影响其他输出表。"""
+        entry = store.find(MODULE, entry_id)
+        if entry is None:
+            return None, f"聚合配置 {entry_id} 不存在或已归档"
+        if "数据来源" in values and values.get("数据来源") is not None:
+            errors = self._validate_source(str(values.get("数据来源", "")))
+            if errors:
+                return None, "；".join(errors)
+        before = {field: entry.get(field) for field in LIST_FIELDS}
+        for field in LIST_FIELDS:
+            if field in values and values.get(field) is not None:
+                entry[field] = values.get(field)
+        changed_fields = [
+            field for field in LIST_FIELDS
+            if str(before.get(field, "")) != str(entry.get(field, ""))
+        ]
+        if not changed_fields:
+            return entry, "聚合配置无实质变更"
+        plan_registry.notify_aggregate_change(entry_id, f"配置字段变更：{'、'.join(changed_fields)}")
+        return entry, f"聚合配置 {entry_id} 已更新，原计划标记失效，下次读取将按新版本重建"
 
     def run_action(self, entry_id: int, action: str) -> tuple[dict[str, Any] | None, str]:
         entry = store.find(MODULE, entry_id)
@@ -100,3 +127,28 @@ class DataAggregateService:
     def get_compute_plan(self, entry_id: int) -> dict[str, Any]:
         calc = MetricCalculator()
         return calc.build_compute_plan(entry_id)
+
+    def get_preview_sql(self, entry_id: int) -> dict[str, Any]:
+        calc = MetricCalculator()
+        plan = calc.build_compute_plan(entry_id)
+        sql = calc.preview_sql(entry_id)
+        verification = plan_registry.verify_sql_versions(entry_id, sql)
+        return {
+            "aggregate_id": entry_id,
+            "plan_version": plan.get("plan_version"),
+            "version_manifest": plan.get("version_manifest", []),
+            "sql": sql,
+            "version_check": verification,
+        }
+
+    def get_recompute_scope(self, entry_id: int) -> dict[str, Any]:
+        return plan_registry.get_recompute_scope(entry_id)
+
+    def get_plan_index(self) -> dict[str, Any]:
+        return plan_registry.index_listing()
+
+    def get_affected_plans(self, source_code: str) -> dict[str, Any]:
+        return {"source_code": source_code, "plans": plan_registry.find_affected_plans(source_code)}
+
+    def diff_plans(self, entry_id: int, from_version: int, to_version: int) -> dict[str, Any]:
+        return plan_registry.diff_plans(entry_id, from_version, to_version)

@@ -83,6 +83,15 @@ def create_entry(payload: dict[str, object]) -> ActionResult:
     return ActionResult(ok=True, message="指标域已登记", entry=entry)
 
 
+@router.put("/{entry_id}", response_model=ActionResult)
+def update_entry(entry_id: int, payload: dict[str, object]) -> ActionResult:
+    """修改指标域；数据源表/域状态等实质变更会递增来源版本并定位受影响计划。"""
+    entry, message = service.update_entry(entry_id, payload)
+    if entry is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=entry)
+
+
 @router.post("/{entry_id}/actions", response_model=ActionResult)
 def run_action(entry_id: int, payload: ActionPayload) -> ActionResult:
     """对单条指标域执行提交校验、开启域、停用域；不允许的动作会被拦下并说明原因。"""
